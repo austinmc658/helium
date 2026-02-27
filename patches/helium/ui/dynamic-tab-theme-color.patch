@@ -130,12 +130,21 @@
    if (contents == GetActiveWebContents()) {
      UpdatePageActionViews();
    }
-@@ -1759,6 +1764,83 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
+@@ -1759,6 +1764,92 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
    content::WebContentsObserver::Observe(new_contents);
  
-+  auto* favicon_driver = favicon::ContentFaviconDriver::FromWebContents(new_contents);
-+  if (favicon_driver) {
-+    favicon_driver->AddObserver(this);
++  if (old_contents) {
++    if (auto* old_favicon_driver =
++            favicon::ContentFaviconDriver::FromWebContents(old_contents)) {
++      old_favicon_driver->RemoveObserver(this);
++    }
++  }
++
++  if (new_contents) {
++    if (auto* new_favicon_driver =
++            favicon::ContentFaviconDriver::FromWebContents(new_contents)) {
++      new_favicon_driver->AddObserver(this);
++    }
 +  }
 +
 +  UpdateDynamicTabThemeColor();
