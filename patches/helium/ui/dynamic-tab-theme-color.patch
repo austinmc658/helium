@@ -1,0 +1,213 @@
+--- a/chrome/common/pref_names.h
++++ b/chrome/common/pref_names.h
+@@ -1368,6 +1368,10 @@ inline constexpr char kShowMenuButton[] = "helium.browser.show_menu_button";
+ // by enterprise policy.
+ inline constexpr char kGeminiSettings[] = "browser.gemini_settings";
+ 
++// A boolean pref set to true if browser chrome should use a color derived from
++// the active tab's page.
++inline constexpr char kDynamicTabThemeColorEnabled[] = "helium.browser.dynamic_tab_theme_color_enabled";
++
+ // A preference to hold the profile icon version.
+ inline constexpr char kProfileIconVersion[] = "profile.icon_version";
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -137,6 +137,7 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterBooleanPref(prefs::kShowAvatarButton, true);
+   registry->RegisterBooleanPref(prefs::kShowExtensionsButton, true);
+   registry->RegisterBooleanPref(prefs::kShowMenuButton, true);
++  registry->RegisterBooleanPref(prefs::kDynamicTabThemeColorEnabled, false);
+ 
+   registry->RegisterInt64Pref(prefs::kDefaultBrowserLastDeclined, 0);
+   registry->RegisterBooleanPref(prefs::kWebAppCreateOnDesktop, true);
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -254,6 +254,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil::GetAllowlistedKeys() {
+       settings_api::PrefType::kBoolean;
+   (*s_allowlist)[::prefs::kShowMenuButton] =
+       settings_api::PrefType::kBoolean;
++  (*s_allowlist)[::prefs::kDynamicTabThemeColorEnabled] =
++      settings_api::PrefType::kBoolean;
+ 
+   // Appearance settings.
+   (*s_allowlist)[::prefs::kCurrentThemeID] = settings_api::PrefType::kString;
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -314,6 +314,12 @@
+   <message name="IDS_SETTINGS_SYSTEM_THEME_LABEL" desc="Label for the option to use system theme, in appearance settings.">
+     Use GTK theme
+   </message>
++  <message name="IDS_SETTINGS_DYNAMIC_TAB_THEME_COLOR_LABEL" desc="Label for the option to derive browser chrome color from each tab's active page theme color.">
++    Use page color for tab strip and title bar
++  </message>
++  <message name="IDS_SETTINGS_DYNAMIC_TAB_THEME_COLOR_SUBLABEL" desc="Description for dynamic per-tab browser coloring.">
++    Uses &lt;meta name=&quot;theme-color&quot;&gt;, then page background, then favicon color.
++  </message>
+   <message name="IDS_SETTINGS_BOOKMARKS_BAR" desc="Label for a checkbox controlling the visibility of the bookmarks bar.">
+     Show bookmarks bar
+   </message>
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -620,6 +620,10 @@ void AddAppearanceStrings(content::WebUIDataSource* html_source,
+       {"tabHoverCardImagesEnabled", IDS_SETTINGS_TAB_HOVER_CARD_IMAGES},
+       {"showTabGroupsInBookmarksBar", IDS_SETTINGS_SHOW_TAB_GROUPS_IN_BOOKMARKS_BAR},
+       {"showNewTabButtonAtEndOfTabStrip", IDS_SETTINGS_SHOW_NEW_TAB_BUTTON_AT_END_OF_TAB_STRIP},
++      {"dynamicTabThemeColorLabel",
++       IDS_SETTINGS_DYNAMIC_TAB_THEME_COLOR_LABEL},
++      {"dynamicTabThemeColorSublabel",
++       IDS_SETTINGS_DYNAMIC_TAB_THEME_COLOR_SUBLABEL},
+       {"showForwardButton", IDS_SETTINGS_SHOW_FORWARD_BUTTON},
+       {"showHomeButton", IDS_SETTINGS_SHOW_HOME_BUTTON},
+       {"showAvatarButton", IDS_SETTINGS_SHOW_AVATAR_BUTTON},
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html
+@@ -268,6 +268,12 @@
+           label="$i18n{allowSplitViewDragAndDrop}">
+       </settings-toggle-button>
+ 
++      <settings-toggle-button class="hr" id="dynamicTabThemeColor"
++          pref="{{prefs.helium.browser.dynamic_tab_theme_color_enabled}}"
++          label="$i18n{dynamicTabThemeColorLabel}"
++          sub-label="$i18n{dynamicTabThemeColorSublabel}">
++      </settings-toggle-button>
++
+     </settings-section>
+     <template is="dom-if" if="[[showManagedThemeDialog_]]" restamp>
+       <managed-dialog on-close="onManagedDialogClosed_"
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -31,6 +31,7 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "chrome/browser/ui/views/bookmarks/bookmark_bar_view_observer.h"
+ #include "chrome/browser/ui/views/frame/browser_view_layout_delegate.h"
++#include "components/favicon/content/content_favicon_driver_observer.h"
+ #include "components/tabs/public/split_tab_data.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "ui/views/widget/widget_observer.h"
+@@ -112,6 +113,7 @@ class BrowserView : public BrowserViewLayoutDelegate,
+                     public BrowserWindow,
+                     public ImmersiveModeController::Observer,
+                     public TabStripModelObserver,
++                    public favicon::ContentFaviconDriverObserver,
+                     public content::WebContentsObserver,
+                     public views::WidgetObserver,
+                     public ui::AXModeObserver {
+@@ -386,6 +388,16 @@ class BrowserView : public BrowserViewLayoutDelegate,
+   void OnThemeChanged() override;
+   void TabChangedAt(content::WebContents* contents,
+                     int index,
+                     TabChangeType change_type) override;
++  void OnFaviconUpdated(content::WebContents* web_contents,
++                        const favicon_base::FaviconImageResult& image_result) override;
++
++  // Applies page-derived browser chrome color (if enabled).
++  void UpdateDynamicTabThemeColor();
++
++  // Returns the best color candidate for `contents`: theme-color first,
++  // then document background, then favicon dominant color.
++  std::optional<SkColor> GetDynamicTabThemeColorFor(
++      content::WebContents* contents) const;
+ 
+   raw_ptr<TopContainerView> top_container_ = nullptr;
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -92,6 +92,8 @@
+ #include "components/commerce/core/commerce_utils.h"
+ #include "components/content_settings/core/browser/host_content_settings_map.h"
+ #include "components/favicon/content/content_favicon_driver.h"
++#include "components/favicon_base/favicon_util.h"
++#include "components/skia_utils/skia_utils_base.h"
+ #include "components/feature_engagement/public/tracker.h"
+ #include "components/grit/components_scaled_resources.h"
+ #include "components/prefs/pref_service.h"
+@@ -1710,6 +1712,9 @@ void BrowserView::TabChangedAt(content::WebContents* contents,
+   // Existing tab update handling.
+   ToolbarSizeChanged(false);
+ 
++  if (change_type != TabChangeType::kAll)
++    UpdateDynamicTabThemeColor();
++
+   if (contents == GetActiveWebContents()) {
+     UpdatePageActionViews();
+   }
+@@ -1759,6 +1764,83 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
+   content::WebContentsObserver::Observe(new_contents);
+ 
++  auto* favicon_driver = favicon::ContentFaviconDriver::FromWebContents(new_contents);
++  if (favicon_driver) {
++    favicon_driver->AddObserver(this);
++  }
++
++  UpdateDynamicTabThemeColor();
++
+   MaybeUpdateWebUITabStripEmbedder();
+ }
++
++void BrowserView::OnFaviconUpdated(
++    content::WebContents* web_contents,
++    const favicon_base::FaviconImageResult& image_result) {
++  if (web_contents == GetActiveWebContents() && !image_result.image.IsEmpty()) {
++    UpdateDynamicTabThemeColor();
++  }
++}
++
++std::optional<SkColor> BrowserView::GetDynamicTabThemeColorFor(
++    content::WebContents* contents) const {
++  if (!contents || !contents->GetVisibleURL().SchemeIsHTTPOrHTTPS()) {
++    return std::nullopt;
++  }
++
++  // 1) Preferred source: <meta name="theme-color">.
++  if (auto theme_color = contents->GetThemeColor()) {
++    return theme_color;
++  }
++
++  // 2) Fallback: page base background color.
++  if (auto background = contents->GetBackgroundColor()) {
++    return background;
++  }
++
++  // 3) Last resort: dominant favicon color.
++  auto* favicon_driver = favicon::ContentFaviconDriver::FromWebContents(contents);
++  if (favicon_driver) {
++    const gfx::Image& favicon = favicon_driver->GetFavicon();
++    if (!favicon.IsEmpty()) {
++      const SkBitmap* bitmap = favicon.ToSkBitmap();
++      if (bitmap && !bitmap->drawsNothing()) {
++        return color_utils::CalculateKMeanColorOfBitmap(*bitmap);
++      }
++    }
++  }
++
++  return std::nullopt;
++}
++
++void BrowserView::UpdateDynamicTabThemeColor() {
++  if (!browser_ || browser_->profile()->IsOffTheRecord()) {
++    return;
++  }
++
++  if (!browser_->profile()->GetPrefs()->GetBoolean(
++          prefs::kDynamicTabThemeColorEnabled)) {
++    frame_->ClearFrameColorOverride();
++    return;
++  }
++
++  content::WebContents* active_contents = GetActiveWebContents();
++  const std::optional<SkColor> dynamic_color =
++      GetDynamicTabThemeColorFor(active_contents);
++
++  if (!dynamic_color.has_value()) {
++    frame_->ClearFrameColorOverride();
++    return;
++  }
++
++  // Apply only on user web pages (not browser-managed pages).
++  if (!active_contents->GetVisibleURL().SchemeIsHTTPOrHTTPS()) {
++    frame_->ClearFrameColorOverride();
++    return;
++  }
++
++  frame_->SetFrameColorOverride(*dynamic_color);
++}
++
